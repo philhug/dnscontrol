@@ -22,7 +22,8 @@ cd $SOURCE
 
 echo "DEBUG"
 echo "---> Downloading dependencies..."
-go get -v ./...
+#go get -v ./...
+go get -v .
 
 echo "---> Building application source (to main)..."
 go build -v -o main
