@@ -20,6 +20,7 @@ cp -Rf /tmp/src/. $SOURCE
 
 cd $SOURCE
 
+echo "DEBUG"
 echo "---> Downloading dependencies..."
 go get -v ./...
 
