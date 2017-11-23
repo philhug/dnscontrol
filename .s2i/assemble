@@ -23,7 +23,7 @@ cd $SOURCE
 echo "---> Downloading dependencies..."
 go get -v ./...
 
-echo "---> Building application source..."
+echo "---> Building application source (to main)..."
 go build -v -o main
 cp $SOURCE/main $GOBIN/main
 
