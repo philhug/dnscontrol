@@ -32,7 +32,5 @@ cp $SOURCE/main $GOBIN/main
 echo
 echo "===> Build completed at $(date)"
 
-cp $STI_SCRIPTS_PATH/run $STI_SCRIPTS_PATH/assemble
-
 # Fix source directory permissions
 fix-permissions ./
