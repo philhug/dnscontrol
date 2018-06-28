@@ -45,6 +45,7 @@ function newDomain(name, registrar) {
         dnsProviders: {},
         defaultTTL: 0,
         nameservers: [],
+        ignored_labels: [],
     };
 }
 
@@ -141,7 +142,7 @@ function makeCAAFlag(value) {
 }
 
 // CAA_CRITICAL: Critical CAA flag
-var CAA_CRITICAL = makeCAAFlag(1 << 0);
+var CAA_CRITICAL = makeCAAFlag(1 << 7);
 
 // DnsProvider("providerName", 0)
 // nsCount of 0 means don't use or register any nameservers.
@@ -163,6 +164,38 @@ var AAAA = recordBuilder('AAAA');
 
 // ALIAS(name,target, recordModifiers...)
 var ALIAS = recordBuilder('ALIAS');
+
+// R53_ALIAS(name, target, type, recordModifiers...)
+var R53_ALIAS = recordBuilder('R53_ALIAS', {
+    args: [['name', _.isString], ['type', validateR53AliasType], ['target', _.isString]],
+    transform: function (record, args, modifiers) {
+        record.name = args.name;
+        record.target = args.target;
+        if (_.isObject(record.r53_alias)) {
+            record.r53_alias['type'] = args.type;
+        } else {
+            record.r53_alias = { 'type': args.type };
+        }
+    },
+});
+
+// R53_ZONE(zone_id)
+function R53_ZONE(zone_id) {
+    return function (r) {
+        if (_.isObject(r.r53_alias)) {
+            r.r53_alias['zone_id'] = zone_id;
+        } else {
+            r.r53_alias = { 'zone_id': zone_id }
+        }
+    };
+}
+
+function validateR53AliasType(value) {
+    if (!_.isString(value)) {
+        return false;
+    }
+    return ['A', 'AAAA', 'CNAME', 'CAA', 'MX', 'TXT', 'PTR', 'SPF', 'SRV', 'NAPTR'].indexOf(value) != -1;
+}
 
 // CAA(name,tag,value, recordModifiers...)
 var CAA = recordBuilder('CAA', {
@@ -209,7 +242,7 @@ var TLSA = recordBuilder('TLSA', {
         ['usage', _.isNumber],
         ['selector', _.isNumber],
         ['matchingtype', _.isNumber],
-        ['target', _.isString], //recordBuilder needs a "target" argument
+        ['target', _.isString], // recordBuilder needs a "target" argument
     ],
     transform: function(record, args, modifiers) {
         record.name = args.name;
@@ -220,8 +253,32 @@ var TLSA = recordBuilder('TLSA', {
     },
 });
 
+function isStringOrArray(x) {
+    return _.isString(x) || _.isArray(x);
+}
+
 // TXT(name,target, recordModifiers...)
-var TXT = recordBuilder('TXT');
+var TXT = recordBuilder('TXT', {
+    args: [['name', _.isString], ['target', isStringOrArray]],
+    transform: function(record, args, modifiers) {
+        record.name = args.name;
+        // Store the strings twice:
+        //   .target is the first string
+        //   .txtstrings is the individual strings.
+        //   NOTE: If there are more than 1 string, providers should only access
+        //   .txtstrings, thus it doesn't matter what we store in .target.
+        //   However, by storing the first string there, it improves backwards
+        //   compatibility when the len(array) == 1 and (intentionally) breaks
+        //   broken providers early in the integration tests.
+        if (_.isString(args.target)) {
+            record.target = args.target;
+            record.txtstrings = [args.target];
+        } else {
+            record.target = args.target[0];
+            record.txtstrings = args.target;
+        }
+    },
+});
 
 // MX(name,priority,target, recordModifiers...)
 var MX = recordBuilder('MX', {
@@ -237,24 +294,16 @@ var MX = recordBuilder('MX', {
     },
 });
 
-function checkArgs(checks, args, desc) {
-    if (args.length < checks.length) {
-        throw desc;
-    }
-    for (var i = 0; i < checks.length; i++) {
-        if (!checks[i](args[i])) {
-            throw desc + ' - argument ' + i + ' is not correct type';
-        }
-    }
-}
-
 // NS(name,target, recordModifiers...)
 var NS = recordBuilder('NS');
 
 // NAMESERVER(name,target)
-function NAMESERVER(name, target) {
+function NAMESERVER(name) {
+    if (arguments.length != 1){
+        throw("NAMESERVER only accepts one argument for name.")
+    }
     return function(d) {
-        d.nameservers.push({ name: name, target: target });
+        d.nameservers.push({ name: name });
     };
 }
 
@@ -288,6 +337,13 @@ function format_tt(transform_table) {
         lines.push(row.join(' ~ '));
     }
     return lines.join(' ; ');
+}
+
+// IGNORE(name)
+function IGNORE(name) {
+    return function (d) {
+        d.ignored_labels.push(name);
+    };
 }
 
 // IMPORT_TRANSFORM(translation_table, domain)
@@ -450,7 +506,7 @@ function addRecord(d, type, name, target, mods) {
             if (_.isFunction(m)) {
                 m(rec);
             } else if (_.isObject(m)) {
-                //convert transforms to strings
+                // convert transforms to strings
                 if (m.transform && _.isArray(m.transform)) {
                     m.transform = format_tt(m.transform);
                 }
@@ -469,7 +525,7 @@ function addRecord(d, type, name, target, mods) {
     return rec;
 }
 
-//ip conversion functions from http://stackoverflow.com/a/8105740/121660
+// ip conversion functions from http://stackoverflow.com/a/8105740/121660
 // via http://javascript.about.com/library/blipconvert.htm
 function IP(dot) {
     var d = dot.split('.');
@@ -576,4 +632,13 @@ function SPF_BUILDER(value) {
     r.push(TXT(value.label, rawspf, p));
 
     return r;
+}
+
+// Split a DKIM string if it is >254 bytes.
+function DKIM(arr) {
+    chunkSize = 255;
+    var R = [];
+    for (var i = 0, len = arr.length; i < len; i += chunkSize)
+        R.push(arr.slice(i, i + chunkSize));
+    return R;
 }

@@ -10,12 +10,14 @@ import (
 	"github.com/StackExchange/dnscontrol/providers"
 	"github.com/StackExchange/dnscontrol/providers/diff"
 	"github.com/miekg/dns/dnsutil"
+	"github.com/pkg/errors"
 
 	"net/url"
 
-	"golang.org/x/oauth2"
 	"regexp"
 	"strings"
+
+	"golang.org/x/oauth2"
 )
 
 /*
@@ -44,6 +46,7 @@ var allowedTTLValues = []uint32{
 
 var srvRegexp = regexp.MustCompile(`^_(?P<Service>\w+)\.\_(?P<Protocol>\w+)$`)
 
+// LinodeApi is the handle for this provider.
 type LinodeApi struct {
 	client      *http.Client
 	baseURL     *url.URL
@@ -58,9 +61,10 @@ var defaultNameServerNames = []string{
 	"ns5.linode.com",
 }
 
+// NewLinode creates the provider.
 func NewLinode(m map[string]string, metadata json.RawMessage) (providers.DNSServiceProvider, error) {
 	if m["token"] == "" {
-		return nil, fmt.Errorf("Linode Token must be provided.")
+		return nil, errors.Errorf("Missing Linode token")
 	}
 
 	ctx := context.Background()
@@ -71,7 +75,7 @@ func NewLinode(m map[string]string, metadata json.RawMessage) (providers.DNSServ
 
 	baseURL, err := url.Parse(defaultBaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("Linode base URL not valid")
+		return nil, errors.Errorf("Linode base URL not valid")
 	}
 
 	api := &LinodeApi{client: client, baseURL: baseURL}
@@ -84,20 +88,22 @@ func NewLinode(m map[string]string, metadata json.RawMessage) (providers.DNSServ
 	return api, nil
 }
 
-var docNotes = providers.DocumentationNotes{
-	providers.DocOfficiallySupported: providers.Cannot(),
+var features = providers.DocumentationNotes{
 	providers.DocDualHost:            providers.Cannot(),
+	providers.DocOfficiallySupported: providers.Cannot(),
 }
 
 func init() {
 	// SRV support is in this provider, but Linode doesn't seem to support it properly
-	providers.RegisterDomainServiceProviderType("LINODE", NewLinode, docNotes)
+	providers.RegisterDomainServiceProviderType("LINODE", NewLinode, features)
 }
 
+// GetNameservers returns the nameservers for a domain.
 func (api *LinodeApi) GetNameservers(domain string) ([]*models.Nameserver, error) {
 	return models.StringsToNameservers(defaultNameServerNames), nil
 }
 
+// GetDomainCorrections returns the corrections for a domain.
 func (api *LinodeApi) GetDomainCorrections(dc *models.DomainConfig) ([]*models.Correction, error) {
 	dc, err := dc.Copy()
 	if err != nil {
@@ -113,7 +119,7 @@ func (api *LinodeApi) GetDomainCorrections(dc *models.DomainConfig) ([]*models.C
 	}
 	domainID, ok := api.domainIndex[dc.Name]
 	if !ok {
-		return nil, fmt.Errorf("%s not listed in domains for Linode account", dc.Name)
+		return nil, errors.Errorf("%s not listed in domains for Linode account", dc.Name)
 	}
 
 	records, err := api.getRecords(domainID)
@@ -129,16 +135,18 @@ func (api *LinodeApi) GetDomainCorrections(dc *models.DomainConfig) ([]*models.C
 	// Linode always has read-only NS servers, but these are not mentioned in the API response
 	// https://github.com/linode/manager/blob/edd99dc4e1be5ab8190f243c3dbf8b830716255e/src/constants.js#L184
 	for _, name := range defaultNameServerNames {
-		existingRecords = append(existingRecords, &models.RecordConfig{
-			NameFQDN: dc.Name,
+		rc := &models.RecordConfig{
 			Type:     "NS",
-			Target:   name,
 			Original: &domainRecord{},
-		})
+		}
+		rc.SetLabelFromFQDN(dc.Name, dc.Name)
+		rc.SetTarget(name)
+
+		existingRecords = append(existingRecords, rc)
 	}
 
 	// Normalize
-	models.Downcase(existingRecords)
+	models.PostProcessRecords(existingRecords)
 
 	// Linode doesn't allow selecting an arbitrary TTL, only a set of predefined values
 	// We need to make sure we don't change it every time if it is as close as it's going to get
@@ -215,19 +223,8 @@ func (api *LinodeApi) GetDomainCorrections(dc *models.DomainConfig) ([]*models.C
 }
 
 func toRc(dc *models.DomainConfig, r *domainRecord) *models.RecordConfig {
-	// This handles "@" etc.
-	name := dnsutil.AddOrigin(r.Name, dc.Name)
-
-	target := r.Target
-	// Make target FQDN (#rtype_variations)
-	if r.Type == "CNAME" || r.Type == "MX" || r.Type == "NS" || r.Type == "SRV" {
-		target = dnsutil.AddOrigin(target+".", dc.Name)
-	}
-
-	return &models.RecordConfig{
-		NameFQDN:     name,
+	rc := &models.RecordConfig{
 		Type:         r.Type,
-		Target:       target,
 		TTL:          r.TTLSec,
 		MxPreference: r.Priority,
 		SrvPriority:  r.Priority,
@@ -235,13 +232,25 @@ func toRc(dc *models.DomainConfig, r *domainRecord) *models.RecordConfig {
 		SrvPort:      uint16(r.Port),
 		Original:     r,
 	}
+	rc.SetLabel(r.Name, dc.Name)
+
+	switch rtype := r.Type; rtype { // #rtype_variations
+	case "TXT":
+		rc.SetTargetTXT(r.Target)
+	case "CNAME", "MX", "NS", "SRV":
+		rc.SetTarget(dnsutil.AddOrigin(r.Target+".", dc.Name))
+	default:
+		rc.SetTarget(r.Target)
+	}
+
+	return rc
 }
 
 func toReq(dc *models.DomainConfig, rc *models.RecordConfig) (*recordEditRequest, error) {
 	req := &recordEditRequest{
 		Type:     rc.Type,
-		Name:     dnsutil.TrimDomainName(rc.NameFQDN, dc.Name),
-		Target:   rc.Target,
+		Name:     rc.GetLabel(),
+		Target:   rc.GetTargetField(),
 		TTL:      int(rc.TTL),
 		Priority: 0,
 		Port:     int(rc.SrvPort),
@@ -268,7 +277,7 @@ func toReq(dc *models.DomainConfig, rc *models.RecordConfig) (*recordEditRequest
 		result := srvRegexp.FindStringSubmatch(req.Name)
 
 		if len(result) != 3 {
-			return nil, fmt.Errorf("SRV Record must match format \"_service._protocol\" not %s", req.Name)
+			return nil, errors.Errorf("SRV Record must match format \"_service._protocol\" not %s", req.Name)
 		}
 
 		var serviceName, protocol string = result[1], strings.ToLower(result[2])
@@ -292,9 +301,8 @@ func fixTarget(target, domain string) string {
 	// Linode always wants a fully qualified target name
 	if target[len(target)-1] == '.' {
 		return target[:len(target)-1]
-	} else {
-		return fmt.Sprintf("%s.%s", target, domain)
 	}
+	return fmt.Sprintf("%s.%s", target, domain)
 }
 
 func fixTTL(ttl uint32) uint32 {

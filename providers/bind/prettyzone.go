@@ -1,6 +1,7 @@
+package bind
+
 // Generate zonefiles.
 // This generates a zonefile that prioritizes beauty over efficiency.
-package bind
 
 import (
 	"bytes"
@@ -17,7 +18,7 @@ import (
 
 type zoneGenData struct {
 	Origin     string
-	DefaultTtl uint32
+	DefaultTTL uint32
 	Records    []dns.RR
 }
 
@@ -40,8 +41,6 @@ func (z *zoneGenData) Less(i, j int) bool {
 		return zoneRrtypeLess(rrtypeA, rrtypeB)
 	}
 	switch rrtypeA { // #rtype_variations
-	case dns.TypeNS, dns.TypeTXT, dns.TypeTLSA:
-		// pass through.
 	case dns.TypeA:
 		ta2, tb2 := a.(*dns.A), b.(*dns.A)
 		ipa, ipb := ta2.A.To4(), tb2.A.To4()
@@ -56,7 +55,11 @@ func (z *zoneGenData) Less(i, j int) bool {
 	case dns.TypeMX:
 		ta2, tb2 := a.(*dns.MX), b.(*dns.MX)
 		pa, pb := ta2.Preference, tb2.Preference
-		return pa < pb
+		// sort by priority. If they are equal, sort by Mx.
+		if pa != pb {
+			return pa < pb
+		}
+		return ta2.Mx < tb2.Mx
 	case dns.TypeSRV:
 		ta2, tb2 := a.(*dns.SRV), b.(*dns.SRV)
 		pa, pb := ta2.Port, tb2.Port
@@ -91,17 +94,15 @@ func (z *zoneGenData) Less(i, j int) bool {
 			return fa > fb
 		}
 	default:
-		panic(fmt.Sprintf("zoneGenData Less: unimplemented rtype %v", dns.TypeToString[rrtypeA]))
-		// We panic so that we quickly find any switch statements
-		// that have not been updated for a new RR type.
+		// pass through. String comparison is sufficient.
 	}
 	return a.String() < b.String()
 }
 
-// mostCommonTtl returns the most common TTL in a set of records. If there is
+// mostCommonTTL returns the most common TTL in a set of records. If there is
 // a tie, the highest TTL is selected. This makes the results consistent.
 // NS records are not included in the analysis because Tom said so.
-func mostCommonTtl(records []dns.RR) uint32 {
+func mostCommonTTL(records []dns.RR) uint32 {
 	// Index the TTLs in use:
 	d := make(map[uint32]int)
 	for _, r := range records {
@@ -141,11 +142,11 @@ func WriteZoneFile(w io.Writer, records []dns.RR, origin string) error {
 	// * $TTL is used to eliminate clutter. The most common TTL value is used.
 	// * "@" is used instead of the apex domain name.
 
-	defaultTtl := mostCommonTtl(records)
+	defaultTTL := mostCommonTTL(records)
 
 	z := &zoneGenData{
 		Origin:     dnsutil.AddOrigin(origin, "."),
-		DefaultTtl: defaultTtl,
+		DefaultTTL: defaultTTL,
 	}
 	z.Records = nil
 	for _, r := range records {
@@ -160,7 +161,7 @@ func (z *zoneGenData) generateZoneFileHelper(w io.Writer) error {
 	nameShortPrevious := ""
 
 	sort.Sort(z)
-	fmt.Fprintln(w, "$TTL", z.DefaultTtl)
+	fmt.Fprintln(w, "$TTL", z.DefaultTTL)
 	for i, rr := range z.Records {
 		line := rr.String()
 		if line[0] == ';' {
@@ -186,7 +187,7 @@ func (z *zoneGenData) generateZoneFileHelper(w io.Writer) error {
 
 		// items[1]: ttl
 		ttl := ""
-		if hdr.Ttl != z.DefaultTtl && hdr.Ttl != 0 {
+		if hdr.Ttl != z.DefaultTTL && hdr.Ttl != 0 {
 			ttl = items[1]
 		}
 
@@ -200,9 +201,6 @@ func (z *zoneGenData) generateZoneFileHelper(w io.Writer) error {
 
 		// items[4]: the remaining line
 		target := items[4]
-		//if typeStr == "TXT" {
-		//	fmt.Printf("generateZoneFileHelper.go: target=%#v\n", target)
-		//}
 
 		fmt.Fprintln(w, formatLine([]int{10, 5, 2, 5, 0}, []string{name, ttl, "IN", typeStr, target}))
 	}
@@ -291,10 +289,9 @@ func zoneLabelLess(a, b string) bool {
 			bu, berr := strconv.ParseUint(bs[j], 10, 64)
 			if aerr == nil && berr == nil {
 				return au < bu
-			} else {
-				// otherwise, compare as strings:
-				return as[i] < bs[j]
 			}
+			// otherwise, compare as strings:
+			return as[i] < bs[j]
 		}
 	}
 	// The min top elements were equal, so the shorter name is less.

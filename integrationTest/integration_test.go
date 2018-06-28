@@ -15,6 +15,7 @@ import (
 	_ "github.com/StackExchange/dnscontrol/providers/_all"
 	"github.com/StackExchange/dnscontrol/providers/config"
 	"github.com/miekg/dns/dnsutil"
+	"github.com/pkg/errors"
 )
 
 var providerToRun = flag.String("provider", "", "Provider to run")
@@ -106,22 +107,25 @@ func runTests(t *testing.T, prv providers.DNSServiceProvider, domainName string,
 			dom, _ := dc.Copy()
 			for _, r := range tst.Records {
 				rc := models.RecordConfig(*r)
-				rc.NameFQDN = dnsutil.AddOrigin(rc.Name, domainName)
-				if rc.Target == "**current-domain**" {
-					rc.Target = domainName + "."
+				if strings.Contains(rc.GetTargetField(), "**current-domain**") {
+					rc.SetTarget(strings.Replace(rc.GetTargetField(), "**current-domain**", domainName, 1) + ".")
+				}
+				if strings.Contains(rc.GetLabelFQDN(), "**current-domain**") {
+					rc.SetLabelFromFQDN(strings.Replace(rc.GetLabelFQDN(), "**current-domain**", domainName, 1), domainName)
 				}
 				dom.Records = append(dom.Records, &rc)
 			}
-			models.Downcase(dom.Records)
+			dom.IgnoredLabels = tst.IgnoredLabels
+			models.PostProcessRecords(dom.Records)
 			dom2, _ := dom.Copy()
 			// get corrections for first time
 			corrections, err := prv.GetDomainCorrections(dom)
 			if err != nil {
-				t.Fatal(err)
+				t.Fatal(errors.Wrap(err, "runTests"))
 			}
 			if !skipVal && i != *startIdx && len(corrections) == 0 {
 				if tst.Desc != "Empty" {
-					// There are "no corrections" if the last test was programatically
+					// There are "no corrections" if the last test was programmatically
 					// skipped.  We detect this (possibly inaccurately) by checking to
 					// see if .Desc is "Empty".
 					t.Fatalf("Expect changes for all tests, but got none")
@@ -136,7 +140,7 @@ func runTests(t *testing.T, prv providers.DNSServiceProvider, domainName string,
 					t.Fatal(err)
 				}
 			}
-			//run a second time and expect zero corrections
+			// run a second time and expect zero corrections
 			corrections, err = prv.GetDomainCorrections(dom2)
 			if err != nil {
 				t.Fatal(err)
@@ -196,11 +200,25 @@ func TestDualProviders(t *testing.T) {
 }
 
 type TestCase struct {
-	Desc    string
-	Records []*rec
+	Desc          string
+	Records       []*rec
+	IgnoredLabels []string
 }
 
 type rec models.RecordConfig
+
+func (r *rec) GetLabel() string {
+	return r.Name
+}
+
+func (r *rec) SetLabel(label, domain string) {
+	r.Name = label
+	r.NameFQDN = dnsutil.AddOrigin(label, "**current-domain**")
+}
+
+func (r *rec) SetTarget(target string) {
+	r.Target = target
+}
 
 func a(name, target string) *rec {
 	return makeRec(name, target, "A")
@@ -212,6 +230,14 @@ func cname(name, target string) *rec {
 
 func alias(name, target string) *rec {
 	return makeRec(name, target, "ALIAS")
+}
+
+func r53alias(name, aliasType, target string) *rec {
+	r := makeRec(name, target, "R53_ALIAS")
+	r.R53Alias = map[string]string{
+		"type": aliasType,
+	}
+	return r
 }
 
 func ns(name, target string) *rec {
@@ -237,7 +263,17 @@ func srv(name string, priority, weight, port uint16, target string) *rec {
 }
 
 func txt(name, target string) *rec {
-	return makeRec(name, target, "TXT")
+	// FYI: This must match the algorithm in pkg/js/helpers.js TXT.
+	r := makeRec(name, target, "TXT")
+	r.TxtStrings = []string{target}
+	return r
+}
+
+func txtmulti(name string, target []string) *rec {
+	// FYI: This must match the algorithm in pkg/js/helpers.js TXT.
+	r := makeRec(name, target[0], "TXT")
+	r.TxtStrings = target
+	return r
 }
 
 func caa(name string, tag string, flag uint8, target string) *rec {
@@ -252,17 +288,25 @@ func tlsa(name string, usage, selector, matchingtype uint8, target string) *rec 
 	r.TlsaUsage = usage
 	r.TlsaSelector = selector
 	r.TlsaMatchingType = matchingtype
-	r.Target = target
+	return r
+}
+
+func ignore(name string) *rec {
+	r := &rec{
+		Type: "IGNORE",
+	}
+	r.SetLabel(name, "**current-domain**")
 	return r
 }
 
 func makeRec(name, target, typ string) *rec {
-	return &rec{
-		Name:   name,
-		Type:   typ,
-		Target: target,
-		TTL:    300,
+	r := &rec{
+		Type: typ,
+		TTL:  300,
 	}
+	r.SetLabel(name, "**current-domain**")
+	r.SetTarget(target)
+	return r
 }
 
 func (r *rec) ttl(t uint32) *rec {
@@ -271,9 +315,19 @@ func (r *rec) ttl(t uint32) *rec {
 }
 
 func tc(desc string, recs ...*rec) *TestCase {
+	var records []*rec
+	var ignored []string
+	for _, r := range recs {
+		if r.Type == "IGNORE" {
+			ignored = append(ignored, r.GetLabel())
+		} else {
+			records = append(records, r)
+		}
+	}
 	return &TestCase{
-		Desc:    desc,
-		Records: recs,
+		Desc:          desc,
+		Records:       records,
+		IgnoredLabels: ignored,
 	}
 }
 
@@ -286,7 +340,7 @@ func manyA(namePattern, target string, n int) []*rec {
 }
 
 func makeTests(t *testing.T) []*TestCase {
-	//ALWAYS ADD TO BOTTOM OF LIST. Order and indexes matter.
+	// ALWAYS ADD TO BOTTOM OF LIST. Order and indexes matter.
 	tests := []*TestCase{
 		// A
 		tc("Empty"),
@@ -300,6 +354,8 @@ func makeTests(t *testing.T) []*TestCase {
 		tc("Delete one", a("@", "1.2.3.4").ttl(500), a("www", "5.6.7.8").ttl(400)),
 		tc("Add back and change ttl", a("www", "5.6.7.8").ttl(700), a("www", "1.2.3.4").ttl(700)),
 		tc("Change targets and ttls", a("www", "1.1.1.1"), a("www", "2.2.2.2")),
+		tc("Create wildcard", a("*", "1.2.3.4"), a("www", "1.1.1.1")),
+		tc("Delete wildcard", a("www", "1.1.1.1")),
 
 		// CNAMES
 		tc("Empty"),
@@ -309,20 +365,20 @@ func makeTests(t *testing.T) []*TestCase {
 		tc("Change back to CNAME", cname("foo", "google.com.")),
 		tc("Record pointing to @", cname("foo", "**current-domain**")),
 
-		//NS
+		// NS
 		tc("Empty"),
 		tc("NS for subdomain", ns("xyz", "ns2.foo.com.")),
 		tc("Dual NS for subdomain", ns("xyz", "ns2.foo.com."), ns("xyz", "ns1.foo.com.")),
 		tc("NS Record pointing to @", ns("foo", "**current-domain**")),
 
-		//IDNAs
+		// IDNAs
 		tc("Empty"),
 		tc("Internationalized name", a("ööö", "1.2.3.4")),
 		tc("Change IDN", a("ööö", "2.2.2.2")),
 		tc("Internationalized CNAME Target", cname("a", "ööö.com.")),
 		tc("IDN CNAME AND Target", cname("öoö", "ööö.企业.")),
 
-		//MX
+		// MX
 		tc("Empty"),
 		tc("MX record", mx("@", 5, "foo.com.")),
 		tc("Second MX record, same prio", mx("@", 5, "foo.com."), mx("@", 5, "foo2.com.")),
@@ -384,7 +440,7 @@ func makeTests(t *testing.T) []*TestCase {
 		)
 	}
 
-	//TLSA
+	// TLSA
 	if !providers.ProviderHasCabability(*providerToRun, providers.CanUseTLSA) {
 		t.Log("Skipping TLSA Tests because provider does not support them")
 	} else {
@@ -415,7 +471,7 @@ func makeTests(t *testing.T) []*TestCase {
 	// Known page sizes:
 	//  - gandi: 100
 	skip := map[string]bool{
-		"NS1": true, //ns1 free acct only allows 50 records
+		"NS1": true, // ns1 free acct only allows 50 records
 	}
 	if skip[*providerToRun] {
 		t.Log("Skipping Large record count Tests because provider does not support them")
@@ -427,15 +483,69 @@ func makeTests(t *testing.T) []*TestCase {
 		)
 	}
 
-	// Case
+	// NB(tlim): To temporarily skip most of the tests, insert a line like this:
+	//tests = nil
+
+	// TXT (single)
 	tests = append(tests, tc("Empty"),
-		// TXT
 		tc("Empty"),
 		tc("Create a TXT", txt("foo", "simple")),
 		tc("Change a TXT", txt("foo", "changed")),
+		tc("Empty"),
 		tc("Create a TXT with spaces", txt("foo", "with spaces")),
 		tc("Change a TXT with spaces", txt("foo", "with whitespace")),
+		tc("Create 1 TXT as array", txtmulti("foo", []string{"simple"})),
 	)
+
+	// TXTMulti
+	if !providers.ProviderHasCabability(*providerToRun, providers.CanUseTXTMulti) {
+		t.Log("Skipping TXTMulti Tests because provider does not support them")
+	} else {
+		tests = append(tests,
+			tc("Empty"),
+			tc("Create TXTMulti 1",
+				txtmulti("foo1", []string{"simple"}),
+			),
+			tc("Create TXTMulti 2",
+				txtmulti("foo1", []string{"simple"}),
+				txtmulti("foo2", []string{"one", "two"}),
+			),
+			tc("Create TXTMulti 3",
+				txtmulti("foo1", []string{"simple"}),
+				txtmulti("foo2", []string{"one", "two"}),
+				txtmulti("foo3", []string{"eh", "bee", "cee"}),
+			),
+			tc("Create TXTMulti with quotes",
+				txtmulti("foo1", []string{"simple"}),
+				txtmulti("foo2", []string{"o\"ne", "tw\"o"}),
+				txtmulti("foo3", []string{"eh", "bee", "cee"}),
+			),
+			tc("Change TXTMulti",
+				txtmulti("foo1", []string{"dimple"}),
+				txtmulti("foo2", []string{"fun", "two"}),
+				txtmulti("foo3", []string{"eh", "bzz", "cee"}),
+			),
+			tc("Empty"),
+		)
+	}
+
+	// ignored records
+	tests = append(tests,
+		tc("Empty"),
+		tc("Create some records", txt("foo", "simple"), a("foo", "1.2.3.4")),
+		tc("Add a new record - ignoring foo", a("bar", "1.2.3.4"), ignore("foo")),
+	)
+
+	// R53_ALIAS
+	if !providers.ProviderHasCabability(*providerToRun, providers.CanUseRoute53Alias) {
+		t.Log("Skipping Route53 ALIAS Tests because provider does not support them")
+	} else {
+		tests = append(tests, tc("Empty"),
+			tc("create dependent records", a("foo", "1.2.3.4"), a("quux", "2.3.4.5")),
+			tc("ALIAS to A record in same zone", a("foo", "1.2.3.4"), a("quux", "2.3.4.5"), r53alias("bar", "A", "foo.**current-domain**")),
+			tc("change it", a("foo", "1.2.3.4"), a("quux", "2.3.4.5"), r53alias("bar", "A", "quux.**current-domain**")),
+		)
+	}
 
 	return tests
 }

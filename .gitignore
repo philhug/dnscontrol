@@ -8,6 +8,13 @@ creds.json
 ExternalDNS
 docs/_site
 powershell.log
-zones/
-*.env
+integrationTest/env.sh
+integrationTest/.env
+/integrationTest/zones/*.zone
+/integrationTest/config/*.yaml
+env.sh
 certs/
+spfcache*
+adzonedump.*
+zones/
+stack.sh

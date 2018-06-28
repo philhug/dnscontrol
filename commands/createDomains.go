@@ -2,7 +2,6 @@ package commands
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/StackExchange/dnscontrol/providers"
 	"github.com/urfave/cli"
@@ -20,6 +19,7 @@ var _ = cmd(catUtils, func() *cli.Command {
 	}
 }())
 
+// CreateDomainsArgs args required for the create-domain subcommand.
 type CreateDomainsArgs struct {
 	GetDNSConfigArgs
 	GetCredentialsArgs
@@ -31,26 +31,21 @@ func (args *CreateDomainsArgs) flags() []cli.Flag {
 	return flags
 }
 
+// CreateDomains contains all data/flags needed to run create-domains, independently of CLI.
 func CreateDomains(args CreateDomainsArgs) error {
 	cfg, err := GetDNSConfig(args.GetDNSConfigArgs)
 	if err != nil {
 		return err
 	}
-	registrars, dnsProviders, _, err := InitializeProviders(args.CredsFile, cfg)
+	_, err = InitializeProviders(args.CredsFile, cfg, false)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Initialized %d registrars and %d dns service providers.\n", len(registrars), len(dnsProviders))
 	for _, domain := range cfg.Domains {
 		fmt.Println("*** ", domain.Name)
-		for prov := range domain.DNSProviders {
-			dsp, ok := dnsProviders[prov]
-			if !ok {
-				log.Fatalf("DSP %s not declared.", prov)
-			}
-			if creator, ok := dsp.(providers.DomainCreator); ok {
-				fmt.Println("  -", prov)
-				// TODO: maybe return bool if it did anything.
+		for _, provider := range domain.DNSProviderInstances {
+			if creator, ok := provider.Driver.(providers.DomainCreator); ok {
+				fmt.Println("  -", provider.Name)
 				err := creator.EnsureDomainExists(domain.Name)
 				if err != nil {
 					fmt.Printf("Error creating domain: %s\n", err)

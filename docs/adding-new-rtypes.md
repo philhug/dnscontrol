@@ -50,8 +50,9 @@ You'll need to mark which providers support this record type.  The
 initial PR should implement this record for the `bind` provider at
 a minimum.
 
-* Add the capability to the file `dnscontrol/providers/providers.go` (look for `CanUseAlias` and add
+* Add the capability to the file `dnscontrol/providers/capabilities.go` (look for `CanUseAlias` and add
 it to the end of the list.)
+* Add this feature to the feature matrix in `dnscontrol/build/generate/featureMatrix.go` (Add it to the variable `matrix` then add it later in the file with a `setCap()` statement.
 * Mark the `bind` provider as supporting this record type by updating `dnscontrol/providers/bind/bindProvider.go` (look for `providers.CanUs` and you'll see what to do).
 
 ## Step 3: Add a helper function
@@ -100,7 +101,7 @@ list.
 Each entry in the list is a new state.  For example:
 
 ```
-  //MX
+  // MX
   tc("Empty"),                                    <<< 1
   tc("MX record", mx("@", 5, "foo.com.")),        <<< 2
   tc("Change MX pref", mx("@", 10, "foo.com.")),  <<< 3

@@ -9,6 +9,7 @@ import (
 	"github.com/StackExchange/dnscontrol/models"
 	"github.com/StackExchange/dnscontrol/pkg/js"
 	"github.com/StackExchange/dnscontrol/pkg/normalize"
+	"github.com/pkg/errors"
 	"github.com/urfave/cli"
 )
 
@@ -46,6 +47,7 @@ var _ = cmd(catDebug, func() *cli.Command {
 	}
 }())
 
+// PrintIRArgs encapsulates the flags/arguments for the print-ir command.
 type PrintIRArgs struct {
 	GetDNSConfigArgs
 	PrintJSONArgs
@@ -62,6 +64,7 @@ func (args *PrintIRArgs) flags() []cli.Flag {
 	return flags
 }
 
+// PrintIR implements the print-ir subcommand.
 func PrintIR(args PrintIRArgs) error {
 	cfg, err := GetDNSConfig(args.GetDNSConfigArgs)
 	if err != nil {
@@ -70,12 +73,13 @@ func PrintIR(args PrintIRArgs) error {
 	if !args.Raw {
 		errs := normalize.NormalizeAndValidateConfig(cfg)
 		if PrintValidationErrors(errs) {
-			return fmt.Errorf("Exiting due to validation errors")
+			return errors.Errorf("Exiting due to validation errors")
 		}
 	}
 	return PrintJSON(args.PrintJSONArgs, cfg)
 }
 
+// PrintValidationErrors formats and prints the validation errors and warnings.
 func PrintValidationErrors(errs []error) (fatal bool) {
 	if len(errs) == 0 {
 		return false
@@ -92,21 +96,23 @@ func PrintValidationErrors(errs []error) (fatal bool) {
 	return
 }
 
+// ExecuteDSL executes the dnsconfig.js contents.
 func ExecuteDSL(args ExecuteDSLArgs) (*models.DNSConfig, error) {
 	if args.JSFile == "" {
-		return nil, fmt.Errorf("No config specified")
+		return nil, errors.Errorf("No config specified")
 	}
 	text, err := ioutil.ReadFile(args.JSFile)
 	if err != nil {
-		return nil, fmt.Errorf("Reading js file %s: %s", args.JSFile, err)
+		return nil, errors.Errorf("Reading js file %s: %s", args.JSFile, err)
 	}
 	dnsConfig, err := js.ExecuteJavascript(string(text), args.DevMode)
 	if err != nil {
-		return nil, fmt.Errorf("Executing javascript in %s: %s", args.JSFile, err)
+		return nil, errors.Errorf("Executing javascript in %s: %s", args.JSFile, err)
 	}
 	return dnsConfig, nil
 }
 
+// PrintJSON outputs/prettyprints the IR data.
 func PrintJSON(args PrintJSONArgs, config *models.DNSConfig) (err error) {
 	var dat []byte
 	if args.Pretty {

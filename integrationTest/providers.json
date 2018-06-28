@@ -2,7 +2,7 @@
   "ACTIVEDIRECTORY_PS": {
     "ADServer": "$AD_SERVER",
     "domain": "$AD_DOMAIN",
-    "knownFailures": "17,18,19,25,26,27,28,29,30"
+    "knownFailures": "20,21,22,29,30,31,32,33,34,35,38,39,40,41,48,49,51,52,53"
   },
   "BIND": {
     "domain": "example.com"
@@ -29,6 +29,12 @@
     "domain": "$GANDI_DOMAIN",
     "knownFailures": "5"
   },
+  "GANDI-LIVEDNS": {
+    "COMMENT": "5: gandi does not accept TTLs less than 300",
+    "apikey": "$GANDILIVE_KEY",
+    "domain": "$GANDILIVE_DOMAIN",
+    "knownFailures": "5"
+  },
   "GCLOUD": {
     "type": "$GCLOUD_TYPE",
     "client_email": "$GCLOUD_EMAIL",
@@ -40,7 +46,7 @@
     "COMMENT": "25: Linode's hostname validation does not allow the target domain TLD",
     "token": "$LINODE_TOKEN",
     "domain": "$LINODE_DOMAIN",
-    "knownFailures": "25"
+    "knownFailures": "27"
   },
   "NS1": {
     "domain": "$NS1_DOMAIN",
@@ -56,6 +62,10 @@
     "apikey": "$NAMECHEAP_KEY",
     "apiuser": "$NAMECHEAP_USER",
     "domain": "$NAMECHEAP_DOMAIN"
+  },
+  "OCTODNS": {
+    "domain": "example.com",
+    "directory": "config"
   },
   "ROUTE53": {
     "KeyId": "$R53_KEY_ID",

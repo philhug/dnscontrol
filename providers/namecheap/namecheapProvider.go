@@ -14,31 +14,34 @@ import (
 	"github.com/StackExchange/dnscontrol/providers"
 	"github.com/StackExchange/dnscontrol/providers/diff"
 	nc "github.com/billputer/go-namecheap"
-	"github.com/miekg/dns/dnsutil"
+	"github.com/pkg/errors"
 )
 
+// NamecheapDefaultNs lists the default nameservers for this provider.
 var NamecheapDefaultNs = []string{"dns1.registrar-servers.com", "dns2.registrar-servers.com"}
 
+// Namecheap is the handle for this provider.
 type Namecheap struct {
 	ApiKey  string
 	ApiUser string
 	client  *nc.Client
 }
 
-var docNotes = providers.DocumentationNotes{
-	providers.DocCreateDomains:       providers.Cannot("Requires domain registered through their service"),
-	providers.DocOfficiallySupported: providers.Cannot(),
-	providers.DocDualHost:            providers.Cannot("Doesn't allow control of apex NS records"),
+var features = providers.DocumentationNotes{
 	providers.CanUseAlias:            providers.Cannot(),
 	providers.CanUseCAA:              providers.Cannot(),
-	providers.CanUseSRV:              providers.Cannot("The namecheap web console allows you to make SRV records, but their api does not let you read or set them"),
 	providers.CanUsePTR:              providers.Cannot(),
+	providers.CanUseSRV:              providers.Cannot("The namecheap web console allows you to make SRV records, but their api does not let you read or set them"),
 	providers.CanUseTLSA:             providers.Cannot(),
+	providers.CantUseNOPURGE:         providers.Cannot(),
+	providers.DocCreateDomains:       providers.Cannot("Requires domain registered through their service"),
+	providers.DocDualHost:            providers.Cannot("Doesn't allow control of apex NS records"),
+	providers.DocOfficiallySupported: providers.Cannot(),
 }
 
 func init() {
 	providers.RegisterRegistrarType("NAMECHEAP", newReg)
-	providers.RegisterDomainServiceProviderType("NAMECHEAP", newDsp, providers.CantUseNOPURGE, docNotes)
+	providers.RegisterDomainServiceProviderType("NAMECHEAP", newDsp, features)
 	providers.RegisterCustomRecordType("URL", "NAMECHEAP", "")
 	providers.RegisterCustomRecordType("URL301", "NAMECHEAP", "")
 	providers.RegisterCustomRecordType("FRAME", "NAMECHEAP", "")
@@ -56,7 +59,7 @@ func newProvider(m map[string]string, metadata json.RawMessage) (*Namecheap, err
 	api := &Namecheap{}
 	api.ApiUser, api.ApiKey = m["apiuser"], m["apikey"]
 	if api.ApiKey == "" || api.ApiUser == "" {
-		return nil, fmt.Errorf("Namecheap apikey and apiuser must be provided.")
+		return nil, errors.Errorf("missing Namecheap apikey and apiuser")
 	}
 	api.client = nc.NewClient(api.ApiUser, api.ApiKey, api.ApiUser)
 	// if BaseURL is specified in creds, use that url
@@ -103,6 +106,7 @@ func doWithRetry(f func() error) {
 	}
 }
 
+// GetDomainCorrections returns the corrections for the domain.
 func (n *Namecheap) GetDomainCorrections(dc *models.DomainConfig) ([]*models.Correction, error) {
 	dc.Punycode()
 	sld, tld := splitDomain(dc.Name)
@@ -120,9 +124,9 @@ func (n *Namecheap) GetDomainCorrections(dc *models.DomainConfig) ([]*models.Cor
 
 	// namecheap does not allow setting @ NS with basic DNS
 	dc.Filter(func(r *models.RecordConfig) bool {
-		if r.Type == "NS" && r.Name == "@" {
-			if !strings.HasSuffix(r.Target, "registrar-servers.com.") {
-				fmt.Println("\n", r.Target, "Namecheap does not support changing apex NS records. Skipping.")
+		if r.Type == "NS" && r.GetLabel() == "@" {
+			if !strings.HasSuffix(r.GetTargetField(), "registrar-servers.com.") {
+				fmt.Println("\n", r.GetTargetField(), "Namecheap does not support changing apex NS records. Skipping.")
 			}
 			return false
 		}
@@ -145,18 +149,18 @@ func (n *Namecheap) GetDomainCorrections(dc *models.DomainConfig) ([]*models.Cor
 			continue
 		}
 		rec := &models.RecordConfig{
-			NameFQDN:     dnsutil.AddOrigin(r.Name, dc.Name),
 			Type:         r.Type,
-			Target:       r.Address,
 			TTL:          uint32(r.TTL),
 			MxPreference: uint16(r.MXPref),
 			Original:     r,
 		}
+		rec.SetLabel(r.Name, dc.Name)
+		rec.SetTarget(r.Address)
 		actual = append(actual, rec)
 	}
 
 	// Normalize
-	models.Downcase(actual)
+	models.PostProcessRecords(actual)
 
 	differ := diff.New(dc)
 	_, create, delete, modify := differ.IncrementalDiff(actual)
@@ -199,12 +203,11 @@ func (n *Namecheap) generateRecords(dc *models.DomainConfig) error {
 
 	id := 1
 	for _, r := range dc.Records {
-		name := dnsutil.TrimDomainName(r.NameFQDN, dc.Name)
 		rec := nc.DomainDNSHost{
 			ID:      id,
-			Name:    name,
+			Name:    r.GetLabel(),
 			Type:    r.Type,
-			Address: r.Target,
+			Address: r.GetTargetField(),
 			MXPref:  int(r.MxPreference),
 			TTL:     int(r.TTL),
 		}
@@ -220,6 +223,7 @@ func (n *Namecheap) generateRecords(dc *models.DomainConfig) error {
 	return err
 }
 
+// GetNameservers returns the nameservers for a domain.
 func (n *Namecheap) GetNameservers(domainName string) ([]*models.Nameserver, error) {
 	// return default namecheap nameservers
 	ns := NamecheapDefaultNs
@@ -227,6 +231,7 @@ func (n *Namecheap) GetNameservers(domainName string) ([]*models.Nameserver, err
 	return models.StringsToNameservers(ns), nil
 }
 
+// GetRegistrarCorrections returns corrections to update nameservers.
 func (n *Namecheap) GetRegistrarCorrections(dc *models.DomainConfig) ([]*models.Correction, error) {
 	var info *nc.DomainInfo
 	var err error

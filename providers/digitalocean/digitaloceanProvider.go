@@ -10,6 +10,7 @@ import (
 	"github.com/StackExchange/dnscontrol/providers"
 	"github.com/StackExchange/dnscontrol/providers/diff"
 	"github.com/miekg/dns/dnsutil"
+	"github.com/pkg/errors"
 
 	"github.com/digitalocean/godo"
 	"golang.org/x/oauth2"
@@ -24,6 +25,7 @@ Info required in `creds.json`:
 
 */
 
+// DoApi is the handle for operations.
 type DoApi struct {
 	client *godo.Client
 }
@@ -34,9 +36,10 @@ var defaultNameServerNames = []string{
 	"ns3.digitalocean.com",
 }
 
+// NewDo creates a DO-specific DNS provider.
 func NewDo(m map[string]string, metadata json.RawMessage) (providers.DNSServiceProvider, error) {
 	if m["token"] == "" {
-		return nil, fmt.Errorf("Digitalocean Token must be provided.")
+		return nil, errors.Errorf("no Digitalocean token provided")
 	}
 
 	ctx := context.Background()
@@ -54,21 +57,23 @@ func NewDo(m map[string]string, metadata json.RawMessage) (providers.DNSServiceP
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Digitalocean Token is not valid.")
+		return nil, errors.Errorf("token for digitalocean is not valid")
 	}
 
 	return api, nil
 }
 
-var docNotes = providers.DocumentationNotes{
+var features = providers.DocumentationNotes{
 	providers.DocCreateDomains:       providers.Can(),
 	providers.DocOfficiallySupported: providers.Cannot(),
+	providers.CanUseSRV:              providers.Can(),
 }
 
 func init() {
-	providers.RegisterDomainServiceProviderType("DIGITALOCEAN", NewDo, providers.CanUseSRV, docNotes)
+	providers.RegisterDomainServiceProviderType("DIGITALOCEAN", NewDo, features)
 }
 
+// EnsureDomainExists returns an error if domain doesn't exist.
 func (api *DoApi) EnsureDomainExists(domain string) error {
 	ctx := context.Background()
 	_, resp, err := api.client.Domains.Get(ctx, domain)
@@ -78,15 +83,16 @@ func (api *DoApi) EnsureDomainExists(domain string) error {
 			IPAddress: "",
 		})
 		return err
-	} else {
-		return err
 	}
+	return err
 }
 
+// GetNameservers returns the nameservers for domain.
 func (api *DoApi) GetNameservers(domain string) ([]*models.Nameserver, error) {
 	return models.StringsToNameservers(defaultNameServerNames), nil
 }
 
+// GetDomainCorrections returns a list of corretions for the  domain.
 func (api *DoApi) GetDomainCorrections(dc *models.DomainConfig) ([]*models.Correction, error) {
 	ctx := context.Background()
 	dc.Punycode()
@@ -102,7 +108,7 @@ func (api *DoApi) GetDomainCorrections(dc *models.DomainConfig) ([]*models.Corre
 	}
 
 	// Normalize
-	models.Downcase(existingRecords)
+	models.PostProcessRecords(existingRecords)
 
 	differ := diff.New(dc)
 	_, create, delete, modify := differ.IncrementalDiff(existingRecords)
@@ -191,12 +197,12 @@ func toRc(dc *models.DomainConfig, r *godo.DomainRecord) *models.RecordConfig {
 			target = dc.Name
 		}
 		target = dnsutil.AddOrigin(target+".", dc.Name)
+		// FIXME(tlim): The AddOrigin should be a no-op.
+		// Test whether or not it is actually needed.
 	}
 
-	return &models.RecordConfig{
-		NameFQDN:     name,
+	t := &models.RecordConfig{
 		Type:         r.Type,
-		Target:       target,
 		TTL:          uint32(r.TTL),
 		MxPreference: uint16(r.Priority),
 		SrvPriority:  uint16(r.Priority),
@@ -204,25 +210,38 @@ func toRc(dc *models.DomainConfig, r *godo.DomainRecord) *models.RecordConfig {
 		SrvPort:      uint16(r.Port),
 		Original:     r,
 	}
+	t.SetLabelFromFQDN(name, dc.Name)
+	t.SetTarget(target)
+	switch rtype := r.Type; rtype {
+	case "TXT":
+		t.SetTargetTXTString(target)
+	default:
+		// nothing additional required
+	}
+	return t
 }
 
 func toReq(dc *models.DomainConfig, rc *models.RecordConfig) *godo.DomainRecordEditRequest {
-	// DO wants the short name, e.g. @
-	name := dnsutil.TrimDomainName(rc.NameFQDN, dc.Name)
+	name := rc.GetLabel()         // DO wants the short name or "@" for apex.
+	target := rc.GetTargetField() // DO uses the target field only for a single value
+	priority := 0                 // DO uses the same property for MX and SRV priority
 
-	// DO uses the same property for MX and SRV priority
-	priority := 0
 	switch rc.Type { // #rtype_variations
 	case "MX":
 		priority = int(rc.MxPreference)
 	case "SRV":
 		priority = int(rc.SrvPriority)
+	case "TXT":
+		// TXT records are the one place where DO combines many items into one field.
+		target = rc.GetTargetCombined()
+	default:
+		// no action required
 	}
 
 	return &godo.DomainRecordEditRequest{
 		Type:     rc.Type,
 		Name:     name,
-		Data:     rc.Target,
+		Data:     target,
 		TTL:      int(rc.TTL),
 		Priority: priority,
 		Port:     int(rc.SrvPort),

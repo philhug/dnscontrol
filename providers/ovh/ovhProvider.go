@@ -3,13 +3,14 @@ package ovh
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
+
 	"github.com/StackExchange/dnscontrol/models"
 	"github.com/StackExchange/dnscontrol/providers"
 	"github.com/StackExchange/dnscontrol/providers/diff"
-	"github.com/miekg/dns/dnsutil"
+	"github.com/pkg/errors"
 	"github.com/xlucas/go-ovh/ovh"
-	"sort"
-	"strings"
 )
 
 type ovhProvider struct {
@@ -17,14 +18,15 @@ type ovhProvider struct {
 	zones  map[string]bool
 }
 
-var docNotes = providers.DocumentationNotes{
-	providers.DocDualHost:            providers.Can(),
-	providers.DocCreateDomains:       providers.Cannot("New domains require registration"),
-	providers.DocOfficiallySupported: providers.Cannot(),
+var features = providers.DocumentationNotes{
 	providers.CanUseAlias:            providers.Cannot(),
-	providers.CanUseTLSA:             providers.Can(),
 	providers.CanUseCAA:              providers.Cannot(),
 	providers.CanUsePTR:              providers.Cannot(),
+	providers.CanUseSRV:              providers.Can(),
+	providers.CanUseTLSA:             providers.Can(),
+	providers.DocCreateDomains:       providers.Cannot("New domains require registration"),
+	providers.DocDualHost:            providers.Can(),
+	providers.DocOfficiallySupported: providers.Cannot(),
 }
 
 func newOVH(m map[string]string, metadata json.RawMessage) (*ovhProvider, error) {
@@ -50,7 +52,7 @@ func newReg(conf map[string]string) (providers.Registrar, error) {
 
 func init() {
 	providers.RegisterRegistrarType("OVH", newReg)
-	providers.RegisterDomainServiceProviderType("OVH", newDsp, providers.CanUseSRV, providers.CanUseTLSA, docNotes)
+	providers.RegisterDomainServiceProviderType("OVH", newDsp, features)
 }
 
 func (c *ovhProvider) GetNameservers(domain string) ([]*models.Nameserver, error) {
@@ -59,7 +61,7 @@ func (c *ovhProvider) GetNameservers(domain string) ([]*models.Nameserver, error
 	}
 	_, ok := c.zones[domain]
 	if !ok {
-		return nil, fmt.Errorf("%s not listed in zones for ovh account", domain)
+		return nil, errors.Errorf("%s not listed in zones for ovh account", domain)
 	}
 
 	ns, err := c.fetchNS(domain)
@@ -80,7 +82,7 @@ func (e errNoExist) Error() string {
 
 func (c *ovhProvider) GetDomainCorrections(dc *models.DomainConfig) ([]*models.Correction, error) {
 	dc.Punycode()
-	dc.CombineMXs()
+	//dc.CombineMXs()
 
 	if !c.zones[dc.Name] {
 		return nil, errNoExist{dc.Name}
@@ -93,38 +95,14 @@ func (c *ovhProvider) GetDomainCorrections(dc *models.DomainConfig) ([]*models.C
 
 	var actual []*models.RecordConfig
 	for _, r := range records {
-		if r.FieldType == "SOA" {
-			continue
+		rec := nativeToRecord(r, dc.Name)
+		if rec != nil {
+			actual = append(actual, rec)
 		}
-
-		if r.SubDomain == "" {
-			r.SubDomain = "@"
-		}
-
-		// ovh uses a custom type for SPF and DKIM
-		if r.FieldType == "SPF" || r.FieldType == "DKIM" {
-			r.FieldType = "TXT"
-		}
-
-		// ovh default is 3600
-		if r.TTL == 0 {
-			r.TTL = 3600
-		}
-
-		rec := &models.RecordConfig{
-			NameFQDN:       dnsutil.AddOrigin(r.SubDomain, dc.Name),
-			Name:           r.SubDomain,
-			Type:           r.FieldType,
-			Target:         r.Target,
-			TTL:            uint32(r.TTL),
-			CombinedTarget: true,
-			Original:       r,
-		}
-		actual = append(actual, rec)
 	}
 
 	// Normalize
-	models.Downcase(actual)
+	models.PostProcessRecords(actual)
 
 	differ := diff.New(dc)
 	_, create, delete, modify := differ.IncrementalDiff(actual)
@@ -135,7 +113,7 @@ func (c *ovhProvider) GetDomainCorrections(dc *models.DomainConfig) ([]*models.C
 		rec := del.Existing.Original.(*Record)
 		corrections = append(corrections, &models.Correction{
 			Msg: del.String(),
-			F:   c.deleteRecordFunc(rec.Id, dc.Name),
+			F:   c.deleteRecordFunc(rec.ID, dc.Name),
 		})
 	}
 
@@ -166,6 +144,35 @@ func (c *ovhProvider) GetDomainCorrections(dc *models.DomainConfig) ([]*models.C
 	}
 
 	return corrections, nil
+}
+
+func nativeToRecord(r *Record, origin string) *models.RecordConfig {
+	if r.FieldType == "SOA" {
+		return nil
+	}
+	rec := &models.RecordConfig{
+		TTL:      uint32(r.TTL),
+		Original: r,
+	}
+
+	rtype := r.FieldType
+
+	// ovh uses a custom type for SPF and DKIM
+	if rtype == "SPF" || rtype == "DKIM" {
+		rtype = "TXT"
+	}
+
+	rec.SetLabel(r.SubDomain, origin)
+	if err := rec.PopulateFromString(rtype, r.Target, origin); err != nil {
+		panic(errors.Wrap(err, "unparsable record received from ovh"))
+	}
+
+	// ovh default is 3600
+	if rec.TTL == 0 {
+		rec.TTL = 3600
+	}
+
+	return rec
 }
 
 func (c *ovhProvider) GetRegistrarCorrections(dc *models.DomainConfig) ([]*models.Correction, error) {

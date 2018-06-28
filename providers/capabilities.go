@@ -4,21 +4,30 @@ import (
 	"log"
 )
 
-//Capability is a bitmasked set of "features" that a provider supports. Only use constants from this package.
+// Capability is a bitmasked set of "features" that a provider supports. Only use constants from this package.
 type Capability uint32
 
 const (
-	// CanUseAlias indicates the provider support ALIAS records (or flattened CNAMES). Up to the provider to translate them to the appropriate record type.
 	// If you add something to this list, you probably want to add it to pkg/normalize/validate.go checkProviderCapabilities() or somewhere near there.
+
+	// CanUseAlias indicates the provider support ALIAS records (or flattened CNAMES). Up to the provider to translate them to the appropriate record type.
 	CanUseAlias Capability = iota
-	// CanUsePTR indicates the provider can handle PTR records
-	CanUsePTR
-	// CanUseSRV indicates the provider can handle SRV records
-	CanUseSRV
+
 	// CanUseCAA indicates the provider can handle CAA records
 	CanUseCAA
+
+	// CanUsePTR indicates the provider can handle PTR records
+	CanUsePTR
+
+	// CanUseSRV indicates the provider can handle SRV records
+	CanUseSRV
+
 	// CanUseTLSA indicates the provider can handle TLSA records
 	CanUseTLSA
+
+	// CanUseTXTMulti indicates the provider can handle TXT records with multiple strings
+	CanUseTXTMulti
+
 	// CantUseNOPURGE indicates NO_PURGE is broken for this provider. To make it
 	// work would require complex emulation of an incremental update mechanism,
 	// so it is easier to simply mark this feature as not working for this
@@ -31,10 +40,14 @@ const (
 	DocDualHost
 	// DocCreateDomains means provider can add domains with the `dnscontrol create-domains` command
 	DocCreateDomains
+
+	// CanUseRoute53Alias indicates the provider support the specific R53_ALIAS records that only the Route53 provider supports
+	CanUseRoute53Alias
 )
 
 var providerCapabilities = map[string]map[Capability]bool{}
 
+// ProviderHasCabability returns true if provider has capability.
 func ProviderHasCabability(pType string, cap Capability) bool {
 	if providerCapabilities[pType] == nil {
 		return false
@@ -60,12 +73,12 @@ type ProviderMetadata interface{}
 var Notes = map[string]DocumentationNotes{}
 
 func unwrapProviderCapabilities(pName string, meta []ProviderMetadata) {
+	if providerCapabilities[pName] == nil {
+		providerCapabilities[pName] = map[Capability]bool{}
+	}
 	for _, pm := range meta {
 		switch x := pm.(type) {
 		case Capability:
-			if providerCapabilities[pName] == nil {
-				providerCapabilities[pName] = map[Capability]bool{}
-			}
 			providerCapabilities[pName][x] = true
 		case DocumentationNotes:
 			if Notes[pName] == nil {
@@ -73,6 +86,7 @@ func unwrapProviderCapabilities(pName string, meta []ProviderMetadata) {
 			}
 			for k, v := range x {
 				Notes[pName][k] = v
+				providerCapabilities[pName][k] = v.HasFeature
 			}
 		default:
 			log.Fatalf("Unrecognized ProviderMetadata type: %T", pm)

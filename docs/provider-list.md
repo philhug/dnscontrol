@@ -17,6 +17,7 @@ title: Service Providers
 {% endfor %}
 </table>
 
+<a name="features"></a>
 <h2> Provider Features </h2>
 
 <p>The table below shows various features supported, or not supported by DNSControl providers.

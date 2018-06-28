@@ -2,10 +2,13 @@ package ovh
 
 import (
 	"fmt"
+
 	"github.com/StackExchange/dnscontrol/models"
 	"github.com/miekg/dns/dnsutil"
+	"github.com/pkg/errors"
 )
 
+// Void an empty structure.
 type Void struct {
 }
 
@@ -30,6 +33,7 @@ func (c *ovhProvider) fetchZones() error {
 	return nil
 }
 
+// Zone describes the attributes of a DNS zone.
 type Zone struct {
 	LastUpdate      string   `json:"lastUpdate,omitempty"`
 	HasDNSAnycast   bool     `json:"hasDNSAnycast,omitempty"`
@@ -49,17 +53,18 @@ func (c *ovhProvider) fetchZone(fqdn string) (*Zone, error) {
 	return &response, nil
 }
 
+// Record describes a DNS record.
 type Record struct {
 	Target    string `json:"target,omitempty"`
 	Zone      string `json:"zone,omitempty"`
 	TTL       uint32 `json:"ttl,omitempty"`
 	FieldType string `json:"fieldType,omitempty"`
-	Id        int64  `json:"id,omitempty"`
+	ID        int64  `json:"id,omitempty"`
 	SubDomain string `json:"subDomain,omitempty"`
 }
 
 type records struct {
-	recordsId []int
+	recordsID []int
 }
 
 func (c *ovhProvider) fetchRecords(fqdn string) ([]*Record, error) {
@@ -107,9 +112,9 @@ func (c *ovhProvider) deleteRecordFunc(id int64, fqdn string) func() error {
 func (c *ovhProvider) createRecordFunc(rc *models.RecordConfig, fqdn string) func() error {
 	return func() error {
 		record := Record{
-			SubDomain: dnsutil.TrimDomainName(rc.NameFQDN, fqdn),
+			SubDomain: dnsutil.TrimDomainName(rc.GetLabelFQDN(), fqdn),
 			FieldType: rc.Type,
-			Target:    rc.Content(),
+			Target:    rc.GetTargetCombined(),
 			TTL:       rc.TTL,
 		}
 		if record.SubDomain == "@" {
@@ -125,18 +130,18 @@ func (c *ovhProvider) createRecordFunc(rc *models.RecordConfig, fqdn string) fun
 func (c *ovhProvider) updateRecordFunc(old *Record, rc *models.RecordConfig, fqdn string) func() error {
 	return func() error {
 		record := Record{
-			SubDomain: dnsutil.TrimDomainName(rc.NameFQDN, fqdn),
+			SubDomain: rc.GetLabel(),
 			FieldType: rc.Type,
-			Target:    rc.Content(),
+			Target:    rc.GetTargetCombined(),
 			TTL:       rc.TTL,
 			Zone:      fqdn,
-			Id:        old.Id,
+			ID:        old.ID,
 		}
 		if record.SubDomain == "@" {
 			record.SubDomain = ""
 		}
 
-		return c.client.Call("PUT", fmt.Sprintf("/domain/zone/%s/record/%d", fqdn, old.Id), &record, &Void{})
+		return c.client.Call("PUT", fmt.Sprintf("/domain/zone/%s/record/%d", fqdn, old.ID), &record, &Void{})
 	}
 }
 
@@ -155,24 +160,25 @@ func (c *ovhProvider) fetchNS(fqdn string) ([]string, error) {
 	return zone.NameServers, nil
 }
 
+// CurrentNameServer stores information about nameservers.
 type CurrentNameServer struct {
 	ToDelete bool   `json:"toDelete,omitempty"`
-	Ip       string `json:"ip,omitempty"`
+	IP       string `json:"ip,omitempty"`
 	IsUsed   bool   `json:"isUsed,omitempty"`
-	Id       int    `json:"id,omitempty"`
+	ID       int    `json:"id,omitempty"`
 	Host     string `json:"host,omitempty"`
 }
 
 // Retrieve the NS currently being deployed to the registrar
 func (c *ovhProvider) fetchRegistrarNS(fqdn string) ([]string, error) {
-	var nameServersId []int
-	err := c.client.Call("GET", "/domain/"+fqdn+"/nameServer", nil, &nameServersId)
+	var nameServersID []int
+	err := c.client.Call("GET", "/domain/"+fqdn+"/nameServer", nil, &nameServersID)
 	if err != nil {
 		return nil, err
 	}
 
 	var nameServers []string
-	for _, id := range nameServersId {
+	for _, id := range nameServersID {
 		var ns CurrentNameServer
 		err = c.client.Call("GET", fmt.Sprintf("/domain/%s/nameServer/%d", fqdn, id), nil, &ns)
 		if err != nil {
@@ -189,15 +195,18 @@ func (c *ovhProvider) fetchRegistrarNS(fqdn string) ([]string, error) {
 	return nameServers, nil
 }
 
+// DomainNS describes a domain's NS in ovh's protocol.
 type DomainNS struct {
 	Host string `json:"host,omitempty"`
-	Ip   string `json:"ip,omitempty"`
+	IP   string `json:"ip,omitempty"`
 }
 
+// UpdateNS describes a list of nameservers in ovh's protocol.
 type UpdateNS struct {
 	NameServers []DomainNS `json:"nameServers"`
 }
 
+// Task describes a task in ovh's protocol.
 type Task struct {
 	Function      string `json:"function,omitempty"`
 	Status        string `json:"status,omitempty"`
@@ -206,12 +215,13 @@ type Task struct {
 	CreationDate  string `json:"creationDate,omitempty"`
 	Comment       string `json:"comment,omitempty"`
 	TodoDate      string `json:"todoDate,omitempty"`
-	Id            int64  `json:"id,omitempty"`
+	ID            int64  `json:"id,omitempty"`
 	CanCancel     bool   `json:"canCancel,omitempty"`
 	DoneDate      string `json:"doneDate,omitempty"`
 	CanRelaunch   bool   `json:"canRelaunch,omitempty"`
 }
 
+// Domain describes a domain in ovh's protocol.
 type Domain struct {
 	NameServerType     string `json:"nameServerType,omitempty"`
 	TransferLockStatus string `json:"transferLockStatus,omitempty"`
@@ -244,7 +254,7 @@ func (c *ovhProvider) updateNS(fqdn string, ns []string) error {
 	}
 
 	if task.Status == "error" {
-		return fmt.Errorf("API error while updating ns for %s: %s", fqdn, task.Comment)
+		return errors.Errorf("API error while updating ns for %s: %s", fqdn, task.Comment)
 	}
 
 	// we don't wait for the task execution. One of the reason is that

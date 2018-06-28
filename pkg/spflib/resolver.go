@@ -2,11 +2,12 @@ package spflib
 
 import (
 	"encoding/json"
-	"fmt"
 	"io/ioutil"
 	"net"
 	"os"
 	"strings"
+
+	"github.com/pkg/errors"
 )
 
 // Resolver looks up spf txt records associated with a FQDN.
@@ -17,6 +18,7 @@ type Resolver interface {
 // LiveResolver simply queries DNS to resolve SPF records.
 type LiveResolver struct{}
 
+// GetSPF looks up the SPF record named "name".
 func (l LiveResolver) GetSPF(name string) (string, error) {
 	vals, err := net.LookupTXT(name)
 	if err != nil {
@@ -26,13 +28,13 @@ func (l LiveResolver) GetSPF(name string) (string, error) {
 	for _, v := range vals {
 		if strings.HasPrefix(v, "v=spf1") {
 			if spf != "" {
-				return "", fmt.Errorf("%s has multiple SPF records", name)
+				return "", errors.Errorf("%s has multiple SPF records", name)
 			}
 			spf = v
 		}
 	}
 	if spf == "" {
-		return "", fmt.Errorf("%s has no SPF record", name)
+		return "", errors.Errorf("%s has no SPF record", name)
 	}
 	return spf, nil
 }
@@ -66,6 +68,7 @@ type cache struct {
 	inner Resolver
 }
 
+// NewCache creates a new cache file named filename.
 func NewCache(filename string) (CachingResolver, error) {
 	f, err := os.Open(filename)
 	if err != nil {
